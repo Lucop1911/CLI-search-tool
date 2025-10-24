@@ -1,0 +1,126 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: search
+            asset_name: search-linux-amd64
+          - os: macos-latest
+            artifact_name: search
+            asset_name: search-macos-amd64
+          - os: windows-latest
+            artifact_name: search.exe
+            asset_name: search-windows-amd64.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup GCC (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Setup GCC (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install gcc || true
+
+      - name: Setup MinGW (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      - name: Build (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          gcc -O2 -o ${{ matrix.artifact_name }} srctool.c
+          chmod +x ${{ matrix.artifact_name }}
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          gcc -O2 -o ${{ matrix.artifact_name }} srctool.c
+
+      - name: Test executable (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          ./${{ matrix.artifact_name }} -h
+
+      - name: Test executable (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          ./${{ matrix.artifact_name }} -h
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Display structure
+        run: ls -R ./artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          cp artifacts/search-linux-amd64/search release/search-linux-amd64
+          cp artifacts/search-macos-amd64/search release/search-macos-amd64
+          cp artifacts/search-windows-amd64.exe/search.exe release/search-windows-amd64.exe
+          chmod +x release/search-linux-amd64
+          chmod +x release/search-macos-amd64
+
+      - name: Create checksums
+        run: |
+          cd release
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release/search-linux-amd64
+            release/search-macos-amd64
+            release/search-windows-amd64.exe
+            release/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Release Assets
+        if: steps.create_release.outputs.upload_url
+        run: echo "Release created successfully!"
