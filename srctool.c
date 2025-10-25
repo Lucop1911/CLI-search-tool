@@ -1,12 +1,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <ctype.h>
 
-#define MAX_PATH 4096
+#ifdef _WIN32
+    #include <windows.h>
+    #include <io.h>
+    #define PATH_SEP "\\"
+    #define ACCESS _access
+#else
+    #include <dirent.h>
+    #include <sys/stat.h>
+    #include <unistd.h>
+    #define PATH_SEP "/"
+    #define ACCESS access
+#endif
+
+#define MAX_PATH_LEN 4096
 #define MAX_LINE 1024
 #define MAX_INODES 10000
 
@@ -18,8 +28,10 @@ typedef struct {
     int recursive;
     char *search_term;
     char *start_path;
+#ifndef _WIN32
     ino_t visited_inodes[MAX_INODES];
     int visited_count;
+#endif
 } SearchOptions;
 
 void print_usage(const char *program_name) {
@@ -43,8 +55,8 @@ char *to_lowercase(const char *str) {
     char *lower = malloc(strlen(str) + 1);
     if (!lower) return NULL;
     
-    for (int i = 0; str[i]; i++) {
-        lower[i] = tolower(str[i]);
+    for (size_t i = 0; str[i]; i++) {
+        lower[i] = tolower((unsigned char)str[i]);
     }
     lower[strlen(str)] = '\0';
     return lower;
@@ -63,6 +75,7 @@ int contains_term(const char *text, const char *term, int case_sensitive) {
     }
 }
 
+#ifndef _WIN32
 int is_visited(SearchOptions *opts, ino_t inode) {
     for (int i = 0; i < opts->visited_count; i++) {
         if (opts->visited_inodes[i] == inode) {
@@ -77,6 +90,7 @@ void mark_visited(SearchOptions *opts, ino_t inode) {
         opts->visited_inodes[opts->visited_count++] = inode;
     }
 }
+#endif
 
 void search_file_contents(const char *filepath, const char *term, int case_sensitive) {
     FILE *file = fopen(filepath, "r");
@@ -93,7 +107,6 @@ void search_file_contents(const char *filepath, const char *term, int case_sensi
                 printf("\n\033[1;32m%s\033[0m\n", filepath);
                 found = 1;
             }
-            // Remove newline for display
             line[strcspn(line, "\n")] = 0;
             printf("  \033[1;33mLine %d:\033[0m %s\n", line_num, line);
         }
@@ -102,6 +115,54 @@ void search_file_contents(const char *filepath, const char *term, int case_sensi
     fclose(file);
 }
 
+#ifdef _WIN32
+void search_directory(const char *path, SearchOptions *opts) {
+    WIN32_FIND_DATAA findData;
+    HANDLE hFind;
+    char searchPath[MAX_PATH_LEN];
+    char fullpath[MAX_PATH_LEN];
+    
+    snprintf(searchPath, sizeof(searchPath), "%s\\*", path);
+    
+    hFind = FindFirstFileA(searchPath, &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    
+    do {
+        if (strcmp(findData.cFileName, ".") == 0 || strcmp(findData.cFileName, "..") == 0) {
+            continue;
+        }
+        
+        snprintf(fullpath, sizeof(fullpath), "%s\\%s", path, findData.cFileName);
+        
+        // Skip reparse points (symbolic links, junctions, etc.)
+        if (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            continue;
+        }
+        
+        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (opts->search_folders && contains_term(findData.cFileName, opts->search_term, opts->case_sensitive)) {
+                printf("\n\033[1;34m[FOLDER]\033[0m %s\n", fullpath);
+            }
+            
+            if (opts->recursive) {
+                search_directory(fullpath, opts);
+            }
+        } else {
+            if (opts->search_filenames && contains_term(findData.cFileName, opts->search_term, opts->case_sensitive)) {
+                printf("\n\033[1;36m[FILE]\033[0m %s\n", fullpath);
+            }
+            
+            if (opts->search_contents) {
+                search_file_contents(fullpath, opts->search_term, opts->case_sensitive);
+            }
+        }
+    } while (FindNextFileA(hFind, &findData) != 0);
+    
+    FindClose(hFind);
+}
+#else
 void search_directory(const char *path, SearchOptions *opts) {
     DIR *dir = opendir(path);
     if (!dir) {
@@ -110,15 +171,13 @@ void search_directory(const char *path, SearchOptions *opts) {
     
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        // Skip . and ..
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
         
-        char fullpath[MAX_PATH];
+        char fullpath[MAX_PATH_LEN];
         snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
         
-        // Use lstat to NOT follow symbolic links
         struct stat statbuf;
         if (lstat(fullpath, &statbuf) == -1) {
             continue;
@@ -134,28 +193,23 @@ void search_directory(const char *path, SearchOptions *opts) {
         }
 
         if (S_ISDIR(statbuf.st_mode)) {
-            // Check if we've already visited this inode (prevents circular paths)
             if (is_visited(opts, statbuf.st_ino)) {
                 continue;
             }
             
-            // Check folder name
             if (opts->search_folders && contains_term(entry->d_name, opts->search_term, opts->case_sensitive)) {
                 printf("\n\033[1;34m[FOLDER]\033[0m %s\n", fullpath);
             }
             
-            // Recursive search
             if (opts->recursive) {
                 mark_visited(opts, statbuf.st_ino);
                 search_directory(fullpath, opts);
             }
         } else if (S_ISREG(statbuf.st_mode)) {
-            // Check filename
             if (opts->search_filenames && contains_term(entry->d_name, opts->search_term, opts->case_sensitive)) {
                 printf("\n\033[1;36m[FILE]\033[0m %s\n", fullpath);
             }
             
-            // Search file contents
             if (opts->search_contents) {
                 search_file_contents(fullpath, opts->search_term, opts->case_sensitive);
             }
@@ -163,6 +217,64 @@ void search_directory(const char *path, SearchOptions *opts) {
     }
     
     closedir(dir);
+}
+#endif
+
+int parse_args(int argc, char *argv[], SearchOptions *opts) {
+    int i = 1;
+    while (i < argc && argv[i][0] == '-') {
+        char *arg = argv[i];
+        if (arg[1] == '-') {
+            i++;
+            break;
+        }
+        
+        for (int j = 1; arg[j]; j++) {
+            switch (arg[j]) {
+                case 'c':
+                    opts->search_contents = 1;
+                    break;
+                case 'f':
+                    opts->search_filenames = 1;
+                    break;
+                case 'd':
+                    opts->search_folders = 1;
+                    break;
+                case 'a':
+                    opts->search_contents = 1;
+                    opts->search_filenames = 1;
+                    opts->search_folders = 1;
+                    break;
+                case 'r':
+                    opts->recursive = 1;
+                    break;
+                case 'i':
+                    opts->case_sensitive = 0;
+                    break;
+                case 'h':
+                    print_usage(argv[0]);
+                    exit(0);
+                default:
+                    fprintf(stderr, "Unknown option: -%c\n", arg[j]);
+                    print_usage(argv[0]);
+                    exit(1);
+            }
+        }
+        i++;
+    }
+    
+    if (i >= argc) {
+        fprintf(stderr, "Error: Missing search term\n\n");
+        print_usage(argv[0]);
+        exit(1);
+    }
+    opts->search_term = argv[i];
+    
+    if (i + 1 < argc) {
+        opts->start_path = argv[i + 1];
+    }
+    
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -174,55 +286,13 @@ int main(int argc, char *argv[]) {
         .recursive = 0,
         .search_term = NULL,
         .start_path = ".",
+#ifndef _WIN32
         .visited_count = 0
+#endif
     };
     
-    int opt;
-    while ((opt = getopt(argc, argv, "cfdarih")) != -1) {
-        switch (opt) {
-            case 'c':
-                opts.search_contents = 1;
-                break;
-            case 'f':
-                opts.search_filenames = 1;
-                break;
-            case 'd':
-                opts.search_folders = 1;
-                break;
-            case 'a':
-                opts.search_contents = 1;
-                opts.search_filenames = 1;
-                opts.search_folders = 1;
-                break;
-            case 'r':
-                opts.recursive = 1;
-                break;
-            case 'i':
-                opts.case_sensitive = 0;
-                break;
-            case 'h':
-                print_usage(argv[0]);
-                return 0;
-            default:
-                print_usage(argv[0]);
-                return 1;
-        }
-    }
+    parse_args(argc, argv, &opts);
     
-    // Get search term
-    if (optind >= argc) {
-        fprintf(stderr, "Error: Missing search term\n\n");
-        print_usage(argv[0]);
-        return 1;
-    }
-    opts.search_term = argv[optind];
-    
-    // Get start path if provided
-    if (optind + 1 < argc) {
-        opts.start_path = argv[optind + 1];
-    }
-    
-    // Default to searching contents if nothing specified
     if (!opts.search_contents && !opts.search_filenames && !opts.search_folders) {
         opts.search_contents = 1;
     }
