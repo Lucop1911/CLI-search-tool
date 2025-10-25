@@ -8,6 +8,7 @@
 
 #define MAX_PATH 4096
 #define MAX_LINE 1024
+#define MAX_INODES 10000
 
 typedef struct {
     int search_contents;
@@ -17,6 +18,8 @@ typedef struct {
     int recursive;
     char *search_term;
     char *start_path;
+    ino_t visited_inodes[MAX_INODES];
+    int visited_count;
 } SearchOptions;
 
 void print_usage(const char *program_name) {
@@ -60,6 +63,21 @@ int contains_term(const char *text, const char *term, int case_sensitive) {
     }
 }
 
+int is_visited(SearchOptions *opts, ino_t inode) {
+    for (int i = 0; i < opts->visited_count; i++) {
+        if (opts->visited_inodes[i] == inode) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void mark_visited(SearchOptions *opts, ino_t inode) {
+    if (opts->visited_count < MAX_INODES) {
+        opts->visited_inodes[opts->visited_count++] = inode;
+    }
+}
+
 void search_file_contents(const char *filepath, const char *term, int case_sensitive) {
     FILE *file = fopen(filepath, "r");
     if (!file) return;
@@ -100,12 +118,27 @@ void search_directory(const char *path, SearchOptions *opts) {
         char fullpath[MAX_PATH];
         snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
         
+        // Use lstat to NOT follow symbolic links
         struct stat statbuf;
-        if (stat(fullpath, &statbuf) == -1) {
+        if (lstat(fullpath, &statbuf) == -1) {
             continue;
         }
         
+        // Skip symbolic links and special files
+        if (S_ISLNK(statbuf.st_mode) || 
+            S_ISCHR(statbuf.st_mode) ||
+            S_ISBLK(statbuf.st_mode) ||
+            S_ISFIFO(statbuf.st_mode) ||
+            S_ISSOCK(statbuf.st_mode)) {
+            continue;
+        }
+
         if (S_ISDIR(statbuf.st_mode)) {
+            // Check if we've already visited this inode (prevents circular paths)
+            if (is_visited(opts, statbuf.st_ino)) {
+                continue;
+            }
+            
             // Check folder name
             if (opts->search_folders && contains_term(entry->d_name, opts->search_term, opts->case_sensitive)) {
                 printf("\n\033[1;34m[FOLDER]\033[0m %s\n", fullpath);
@@ -113,6 +146,7 @@ void search_directory(const char *path, SearchOptions *opts) {
             
             // Recursive search
             if (opts->recursive) {
+                mark_visited(opts, statbuf.st_ino);
                 search_directory(fullpath, opts);
             }
         } else if (S_ISREG(statbuf.st_mode)) {
@@ -139,7 +173,8 @@ int main(int argc, char *argv[]) {
         .case_sensitive = 1,
         .recursive = 0,
         .search_term = NULL,
-        .start_path = "."
+        .start_path = ".",
+        .visited_count = 0
     };
     
     int opt;

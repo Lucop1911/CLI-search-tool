@@ -1,6 +1,6 @@
 # CLI Search Tool
 
-A fast and flexible command-line tool for searching text in files, filenames, and folder names.
+An incredibly fast and flexible command-line tool for searching text in files, filenames, and folder names.
 
 ## Installation
 
