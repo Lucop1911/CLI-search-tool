@@ -1,10 +1,7 @@
 name: Build and Release
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+  workflow_dispatch:  # Only manual trigger
 
 jobs:
   create-tag:
@@ -38,9 +35,7 @@ jobs:
         id: next_version
         run: |
           LATEST="${{ steps.get_latest_tag.outputs.latest }}"
-          # Extract number from version (e.g., v5 -> 5)
           CURRENT_NUM=$(echo $LATEST | sed 's/v//')
-          # Increment
           NEXT_NUM=$((CURRENT_NUM + 1))
           NEXT_TAG="v$NEXT_NUM"
           echo "tag=$NEXT_TAG" >> $GITHUB_OUTPUT
@@ -66,13 +61,13 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: srctool
-            asset_name: srctool-linux-amd64
+            asset_name: linux
           - os: macos-latest
             artifact_name: srctool
-            asset_name: srctool-macos-amd64
+            asset_name: macos
           - os: windows-latest
             artifact_name: srctool.exe
-            asset_name: srctool-windows-amd64.exe
+            asset_name: windows
 
     steps:
       - name: Checkout code
@@ -106,7 +101,7 @@ jobs:
         run: |
           gcc -O2 -o ${{ matrix.artifact_name }} srctool.c
 
-      - name: Test executable (Linux/macOS)
+      - name: Test executable
         if: matrix.os != 'windows-latest'
         run: |
           ./${{ matrix.artifact_name }} -h
@@ -145,11 +140,10 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          cp artifacts/srctool-linux-amd64/srctool release/srctool-linux-amd64
-          cp artifacts/srctool-macos-amd64/srctool release/srctool-macos-amd64
-          cp artifacts/srctool-windows-amd64.exe/srctool.exe release/srctool-windows-amd64.exe
-          chmod +x release/srctool-linux-amd64
-          chmod +x release/srctool-macos-amd64
+          cp artifacts/linux/srctool release/srctool
+          cp artifacts/macos/srctool release/srctool-macos
+          cp artifacts/windows/srctool.exe release/srctool.exe
+          chmod +x release/srctool release/srctool-macos
 
       - name: Create checksums
         run: |
@@ -166,9 +160,9 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            release/srctool-linux-amd64
-            release/srctool-macos-amd64
-            release/srctool-windows-amd64.exe
+            release/srctool
+            release/srctool-macos
+            release/srctool.exe
             release/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
